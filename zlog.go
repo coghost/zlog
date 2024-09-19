@@ -59,6 +59,11 @@ func WithLjFilename(s string) LogOptFunc {
 	}
 }
 
+func MustNewLoggerDebug(opts ...LogOptFunc) *zap.Logger {
+	opts = append(opts, WithLogLevel(zapcore.DebugLevel))
+	return MustNewZapLogger(opts...)
+}
+
 // MustNewZapLogger create a simple zap logger
 func MustNewZapLogger(opts ...LogOptFunc) *zap.Logger {
 	opt := &LogOpts{devEnv: true, level: zapcore.InfoLevel, withLJ: true, withConsole: true}
