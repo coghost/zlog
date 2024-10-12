@@ -1,9 +1,10 @@
 package zlog
 
 import (
-	"fmt"
+	"log"
 	"os"
 
+	"github.com/opensearch-project/opensearch-go"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -18,6 +19,12 @@ type LogOpts struct {
 
 	ljFilename   string
 	lumberJacker *lumberjack.Logger
+
+	openSearchConfig   *opensearch.Config
+	openSearchIndex    string
+	openSearchInsecure bool
+
+	internalLogger *zap.Logger
 }
 
 type LogOptFunc func(o *LogOpts)
@@ -59,9 +66,46 @@ func WithLjFilename(s string) LogOptFunc {
 	}
 }
 
+func WithOpenSearchConfig(config *opensearch.Config) LogOptFunc {
+	return func(o *LogOpts) {
+		o.openSearchConfig = config
+	}
+}
+
+func WithOpenSearchIndex(index string) LogOptFunc {
+	return func(o *LogOpts) {
+		o.openSearchIndex = index
+	}
+}
+
+func WithInsecure(insecure bool) LogOptFunc {
+	return func(o *LogOpts) {
+		o.openSearchInsecure = insecure
+	}
+}
+
+func WithInternalLogger(logger *zap.Logger) LogOptFunc {
+	return func(o *LogOpts) {
+		o.internalLogger = logger
+	}
+}
+
 func MustNewLoggerDebug(opts ...LogOptFunc) *zap.Logger {
 	opts = append(opts, WithLogLevel(zapcore.DebugLevel))
 	return MustNewZapLogger(opts...)
+}
+
+// MustNewZapLoggerWithFlush creates a zap logger and returns it along with a flush function.
+// This function wraps MustNewZapLogger to provide a consistent interface with MustNewZapLoggerWithOpenSearch.
+func MustNewZapLoggerWithFlush(opts ...LogOptFunc) (*zap.Logger, func() error) {
+	logger := MustNewZapLogger(opts...)
+
+	// Create a no-op flush function since MustNewZapLogger doesn't have a flush mechanism
+	flushFunc := func() error {
+		return nil
+	}
+
+	return logger, flushFunc
 }
 
 // MustNewZapLogger create a simple zap logger
@@ -87,12 +131,12 @@ func MustNewZapLogger(opts ...LogOptFunc) *zap.Logger {
 	}
 
 	writeSyncer := zapcore.AddSync(opt.lumberJacker)
-	coreLumerJack := zapcore.NewCore(lumberJackEnc, writeSyncer, opt.level)
+	coreLumberJack := zapcore.NewCore(lumberJackEnc, writeSyncer, opt.level)
 	coreConsole := zapcore.NewCore(consoleEnc, zapcore.AddSync(os.Stdout), opt.level)
 
 	var cores []zapcore.Core
 	if opt.withLJ {
-		cores = append(cores, coreLumerJack)
+		cores = append(cores, coreLumberJack)
 	}
 
 	if opt.withConsole {
@@ -100,7 +144,7 @@ func MustNewZapLogger(opts ...LogOptFunc) *zap.Logger {
 	}
 
 	if len(cores) == 0 {
-		fmt.Println("either lumberJack or console is required, but you disabled all")
+		log.Println("No logging outputs specified")
 		return nil
 	}
 
