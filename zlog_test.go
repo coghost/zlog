@@ -14,7 +14,7 @@ func TestMustNewZapLoggerWithOpenSearch(t *testing.T) {
 	insecure := true // Set to false if you have valid certificates
 
 	// Check if OpenSearch is ready
-	if !isOpenSearchReady(opensearchURL, 5*time.Second, insecure) {
+	if !IsOpenSearchReady(opensearchURL, 5*time.Second, insecure) {
 		msg := "OpenSearch is not ready. Skipping test."
 		fmt.Println(msg)
 		t.Skip(msg)
@@ -26,7 +26,6 @@ func TestMustNewZapLoggerWithOpenSearch(t *testing.T) {
 		WithOpenSearchConfig(&defaultConfig),
 		WithOpenSearchIndex("zlog-test"),
 		WithLogLevel(zapcore.InfoLevel),
-		WithInsecure(insecure),
 		WithConsole(true),
 	)
 
@@ -64,7 +63,7 @@ func TestLogToOpenSearch(t *testing.T) {
 	insecure := true // Set to false if you have valid certificates
 
 	// Check if OpenSearch is ready
-	if !isOpenSearchReady(opensearchURL, 5*time.Second, insecure) {
+	if !IsOpenSearchReady(opensearchURL, 5*time.Second, insecure) {
 		msg := "OpenSearch is not ready. Skipping test."
 		fmt.Println(msg)
 		t.Skip(msg)
@@ -75,7 +74,6 @@ func TestLogToOpenSearch(t *testing.T) {
 		WithOpenSearchConfig(&defaultConfig),
 		WithOpenSearchIndex("zlog-test"),
 		WithLogLevel(zapcore.InfoLevel),
-		WithInsecure(insecure),
 		WithConsole(true),
 	)
 

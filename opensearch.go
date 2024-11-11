@@ -239,7 +239,7 @@ func newOpenSearchCore(config *opensearch.Config, index string, level zapcore.Le
 	), writer, nil
 }
 
-func isOpenSearchReady(url string, timeout time.Duration, insecure bool) bool {
+func IsOpenSearchReady(url string, timeout time.Duration, insecure bool) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
