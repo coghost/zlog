@@ -27,11 +27,33 @@ func DefaultOpenSearchConfig(url string, insecure bool) opensearch.Config {
 	}
 }
 
-// MustNewZapLoggerWithOpenSearch creates a zap logger with OpenSearch support
+// MustNewZapLoggerWithOpenSearch creates a zap logger with OpenSearch support.
+// It panics if the required OpenSearch configuration is missing or if initialization fails.
+//
+// Parameters:
+//   - opts: Variadic LogOptFunc parameters for configuring the logger
+//
+// Returns:
+//   - *zap.Logger: A configured zap logger instance
+//   - func() error: A flush function that should be called before program termination
+//     to ensure all logs are written to OpenSearch
+//
+// OpenSearch Configuration:
+//   - Bulk Indexing: Uses OpenSearch bulk API for efficient log shipping
+//   - Workers: 2 concurrent workers for processing logs
+//   - Buffer Size: 256KB before forcing flush
+//   - Flush Interval: Every 10 seconds
+//   - Error Handling: Logs bulk indexing errors through internal logger
+//
+// The function supports both console and OpenSearch output. When OpenSearch is enabled,
+// both openSearchConfig and openSearchIndex must be provided through the options.
 func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, func() error) {
 	opt := &LogOpts{
 		level:       zapcore.InfoLevel,
 		withConsole: false,
+		// rotate log configs
+		indexDateFormat: string(DateFormatDot), // Default format
+		timeLocation:    time.UTC,              // Default timezone
 	}
 	bindLogOpts(opt, opts...)
 
@@ -59,7 +81,18 @@ func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, func() err
 	var openSearchWriter *openSearchWriter
 
 	createOpenSearchCore := func() (zapcore.Core, error) {
-		core, writer, err := newOpenSearchCore(opt.openSearchConfig, opt.openSearchIndex, opt.level, opt.internalLogger)
+		indexNameGenerator := NewIndexGenerator(IndexConfig{
+			BaseIndexName: opt.openSearchIndex,
+			Format:        opt.indexDateFormat,
+			Location:      opt.timeLocation,
+		})
+
+		core, writer, err := newOpenSearchCore(
+			opt.openSearchConfig,
+			indexNameGenerator,
+			opt.level,
+			opt.internalLogger,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OpenSearch core: %v", err)
 		}
@@ -130,11 +163,12 @@ func FlushLogsWithTimeout(flushFunc func() error, timeout time.Duration, logger 
 type openSearchWriter struct {
 	indexer       opensearchutil.BulkIndexer
 	client        *opensearch.Client
-	indexName     string
 	indexerConfig opensearchutil.BulkIndexerConfig
 	mu            sync.Mutex
 	closed        bool
 	logger        *zap.Logger
+
+	indexNameGenerator *IndexGenerator
 }
 
 func (w *openSearchWriter) Write(p []byte) (n int, err error) {
@@ -159,6 +193,7 @@ func (w *openSearchWriter) Write(p []byte) (n int, err error) {
 		ctx,
 		opensearchutil.BulkIndexerItem{
 			Action: "index",
+			Index:  w.indexNameGenerator.GetIndexName(), // Use dynamic index name
 			Body:   bytes.NewReader(encodedEntry),
 		},
 	)
@@ -197,7 +232,28 @@ func (w *openSearchWriter) Flush() error {
 	return nil
 }
 
-func newOpenSearchCore(config *opensearch.Config, index string, level zapcore.Level, logger *zap.Logger) (zapcore.Core, *openSearchWriter, error) {
+// newOpenSearchCore creates a new zapcore.Core that writes logs to OpenSearch.
+//
+// Parameters:
+//   - config: OpenSearch client configuration (*opensearch.Config)
+//   - index: Name of the OpenSearch index to write logs to
+//   - level: Minimum log level to process (zapcore.Level)
+//   - logger: Internal logger for reporting indexing errors
+//
+// Returns:
+//   - zapcore.Core: The configured logging core
+//   - *openSearchWriter: The underlying OpenSearch writer
+//   - error: Any error that occurred during setup
+//
+// BulkIndexer Configuration:
+//   - NumWorkers: 2 concurrent workers for processing log entries
+//   - FlushBytes: 256KB buffer size before forcing flush
+//   - FlushInterval: 10 seconds interval for automatic flushing
+//
+// The function initializes a bulk indexer for efficient log shipping to OpenSearch
+// and configures JSON encoding for the log entries. It uses worker pools and
+// buffering for optimized performance.
+func newOpenSearchCore(config *opensearch.Config, indexNameGenerator *IndexGenerator, level zapcore.Level, logger *zap.Logger) (zapcore.Core, *openSearchWriter, error) {
 	client, err := opensearch.NewClient(*config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create OpenSearch client: %v", err)
@@ -205,9 +261,9 @@ func newOpenSearchCore(config *opensearch.Config, index string, level zapcore.Le
 
 	indexerConfig := opensearchutil.BulkIndexerConfig{
 		Client:        client,
-		Index:         index,
+		Index:         indexNameGenerator.GetIndexName(),
 		NumWorkers:    2,
-		FlushBytes:    256 * 1024, // 1MB
+		FlushBytes:    256 * 1024,
 		FlushInterval: 10 * time.Second,
 		OnError: func(ctx context.Context, err error) {
 			logger.Error("Bulk indexer error", zap.Error(err))
@@ -222,9 +278,10 @@ func newOpenSearchCore(config *opensearch.Config, index string, level zapcore.Le
 	writer := &openSearchWriter{
 		indexer:       indexer,
 		client:        client,
-		indexName:     index,
 		indexerConfig: indexerConfig,
 		logger:        logger,
+		// dynamically generate index name
+		indexNameGenerator: indexNameGenerator,
 	}
 
 	encoderConfig := zap.NewProductionEncoderConfig()

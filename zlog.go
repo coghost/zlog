@@ -3,6 +3,7 @@ package zlog
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/opensearch-project/opensearch-go"
 	"go.uber.org/zap"
@@ -23,6 +24,8 @@ type LogOpts struct {
 	openSearchConfig   *opensearch.Config
 	openSearchIndex    string
 	openSearchInsecure bool
+	indexDateFormat    string
+	timeLocation       *time.Location
 
 	internalLogger *zap.Logger
 }
@@ -72,9 +75,18 @@ func WithOpenSearchConfig(config *opensearch.Config) LogOptFunc {
 	}
 }
 
-func WithOpenSearchIndex(index string) LogOptFunc {
+// WithOpenSearchIndex sets the base index name and optional date format for rotation
+func WithOpenSearchIndex(baseIndex string, dateFormat string) LogOptFunc {
 	return func(o *LogOpts) {
-		o.openSearchIndex = index
+		o.openSearchIndex = baseIndex
+		o.indexDateFormat = dateFormat
+	}
+}
+
+// WithTimeLocation sets the timezone for index rotation
+func WithTimeLocation(location *time.Location) LogOptFunc {
+	return func(o *LogOpts) {
+		o.timeLocation = location
 	}
 }
 

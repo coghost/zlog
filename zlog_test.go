@@ -24,7 +24,7 @@ func TestMustNewZapLoggerWithOpenSearch(t *testing.T) {
 	defaultConfig := DefaultOpenSearchConfig(opensearchURL, insecure)
 	logger, flushFunc := MustNewZapLoggerWithOpenSearch(
 		WithOpenSearchConfig(&defaultConfig),
-		WithOpenSearchIndex("zlog-test"),
+		WithOpenSearchIndex("zlog-test", string(DateFormatDot)),
 		WithLogLevel(zapcore.InfoLevel),
 		WithConsole(true),
 	)
@@ -72,7 +72,7 @@ func TestLogToOpenSearch(t *testing.T) {
 	defaultConfig := DefaultOpenSearchConfig(opensearchURL, insecure)
 	logger, flushFunc := MustNewZapLoggerWithOpenSearch(
 		WithOpenSearchConfig(&defaultConfig),
-		WithOpenSearchIndex("zlog-test"),
+		WithOpenSearchIndex("zlog-test", string(DateFormatDot)),
 		WithLogLevel(zapcore.InfoLevel),
 		WithConsole(true),
 	)
