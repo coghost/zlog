@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,11 +19,22 @@ import (
 	"github.com/opensearch-project/opensearch-go/opensearchutil"
 )
 
+type CleanUp func(context.Context) error
+
+const (
+	writerCtxTimeout = 5 * time.Second
+	numberOfWorkers  = 2
+	flushBytes       = 256 * 1024
+	flushInterval    = 10 * time.Second
+)
+
+var ErrCreateOpensearchCore = errors.New("failed to create OpenSearch core")
+
 func DefaultOpenSearchConfig(url string, insecure bool) opensearch.Config {
 	return opensearch.Config{
 		Addresses: []string{url},
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}, //nolint:gosec
 		},
 	}
 }
@@ -47,7 +59,7 @@ func DefaultOpenSearchConfig(url string, insecure bool) opensearch.Config {
 //
 // The function supports both console and OpenSearch output. When OpenSearch is enabled,
 // both openSearchConfig and openSearchIndex must be provided through the options.
-func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, func() error) {
+func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, CleanUp) {
 	opt := &LogOpts{
 		level:       zapcore.InfoLevel,
 		withConsole: false,
@@ -94,9 +106,11 @@ func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, func() err
 			opt.internalLogger,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create OpenSearch core: %v", err)
+			return nil, fmt.Errorf("failed to create OpenSearch core: %w", err)
 		}
+
 		openSearchWriter = writer
+
 		return core, nil
 	}
 
@@ -114,24 +128,27 @@ func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, func() err
 	coreTee := zapcore.NewTee(cores...)
 	logger := zap.New(coreTee, zap.AddCaller())
 
-	flushFunc := func() error {
+	flushFunc := func(ctx context.Context) error {
 		if openSearchWriter != nil {
-			err := openSearchWriter.Flush()
-			if err != nil {
-				return err
+			if err := openSearchWriter.FlushWithContext(ctx); err != nil {
+				return fmt.Errorf("flush error: %w", err)
 			}
+
 			newCore, err := createOpenSearchCore()
 			if err != nil {
 				return err
 			}
+
 			for i, core := range cores {
 				if core == openSearchCore {
 					cores[i] = newCore
 					openSearchCore = newCore
+
 					break
 				}
 			}
 		}
+
 		return nil
 	}
 
@@ -140,23 +157,17 @@ func MustNewZapLoggerWithOpenSearch(opts ...LogOptFunc) (*zap.Logger, func() err
 
 // FlushLogsWithTimeout attempts to flush logs with a timeout.
 // It returns a function suitable for use with defer.
-func FlushLogsWithTimeout(flushFunc func() error, timeout time.Duration, logger *zap.Logger) func() {
+func FlushLogsWithTimeout(flushFunc CleanUp, timeout time.Duration, logger *zap.Logger) func() {
 	return func() {
-		flushDone := make(chan error, 1)
-		go func() {
-			flushDone <- flushFunc()
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 
-		select {
-		case err := <-flushDone:
-			if err != nil {
-				logger.Error("Error during flush", zap.Error(err))
-			} else {
-				logger.Info("Logs flushed successfully")
-			}
-		case <-time.After(timeout):
-			logger.Error("Flush operation timed out", zap.Duration("timeout", timeout))
+		if err := flushFunc(ctx); err != nil {
+			logger.Error("Error during flush", zap.Error(err))
+			return
 		}
+
+		logger.Info("Logs flushed successfully")
 	}
 }
 
@@ -169,14 +180,21 @@ type openSearchWriter struct {
 	logger        *zap.Logger
 
 	indexNameGenerator *IndexGenerator
+
+	stopChan chan struct{}
 }
 
-func (w *openSearchWriter) Write(p []byte) (n int, err error) {
+func (w *openSearchWriter) Write(buffer []byte) (n int, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if w.closed {
+		return 0, ErrWriterClosed
+	}
+
 	var logEntry map[string]interface{}
-	err = json.Unmarshal(p, &logEntry)
+
+	err = json.Unmarshal(buffer, &logEntry)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse log entry: %w", err)
 	}
@@ -186,29 +204,73 @@ func (w *openSearchWriter) Write(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("failed to re-encode log entry: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), writerCtxTimeout)
 	defer cancel()
 
-	err = w.indexer.Add(
-		ctx,
-		opensearchutil.BulkIndexerItem{
-			Action: "index",
-			Index:  w.indexNameGenerator.GetIndexName(), // Use dynamic index name
-			Body:   bytes.NewReader(encodedEntry),
-		},
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to add document to bulk indexer: %w", err)
+	select {
+	case <-w.stopChan:
+		return 0, ErrWriterIsStopping
+	default:
+		err = w.indexer.Add(
+			ctx,
+			opensearchutil.BulkIndexerItem{
+				Action: "index",
+				Index:  w.indexNameGenerator.GetIndexName(),
+				Body:   bytes.NewReader(encodedEntry),
+			},
+		)
+		if err != nil {
+			return 0, fmt.Errorf("failed to add document to bulk indexer: %w", err)
+		}
 	}
 
-	return len(p), nil
+	return len(buffer), nil
+}
+
+var (
+	ErrWriterClosed     = errors.New("writer already closed")
+	ErrWriterIsStopping = errors.New("writer is stopping")
+)
+
+// FlushWithContext flushes logs with context support
+func (w *openSearchWriter) FlushWithContext(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return ErrWriterClosed
+	}
+
+	// Signal to stop accepting new writes
+	close(w.stopChan)
+	w.closed = true
+
+	stats := w.indexer.Stats()
+	w.logger.Info("Starting flush",
+		zap.Uint64("added", stats.NumAdded),
+		zap.Uint64("flushed", stats.NumFlushed),
+		zap.Uint64("failed", stats.NumFailed))
+
+	// Use provided context for closing
+	if err := w.indexer.Close(ctx); err != nil {
+		w.logger.Error("Error closing bulk indexer", zap.Error(err))
+		return fmt.Errorf("error closing bulk indexer: %w", err)
+	}
+
+	finalStats := w.indexer.Stats()
+	w.logger.Info("Flush completed",
+		zap.Uint64("added", finalStats.NumAdded),
+		zap.Uint64("flushed", finalStats.NumFlushed),
+		zap.Uint64("failed", finalStats.NumFailed))
+
+	return nil
 }
 
 func (w *openSearchWriter) Flush() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //nolint:mnd
 	defer cancel()
 
 	stats := w.indexer.Stats()
@@ -256,15 +318,15 @@ func (w *openSearchWriter) Flush() error {
 func newOpenSearchCore(config *opensearch.Config, indexNameGenerator *IndexGenerator, level zapcore.Level, logger *zap.Logger) (zapcore.Core, *openSearchWriter, error) {
 	client, err := opensearch.NewClient(*config)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create OpenSearch client: %v", err)
+		return nil, nil, fmt.Errorf("failed to create OpenSearch client: %w", err)
 	}
 
 	indexerConfig := opensearchutil.BulkIndexerConfig{
 		Client:        client,
 		Index:         indexNameGenerator.GetIndexName(),
-		NumWorkers:    2,
-		FlushBytes:    256 * 1024,
-		FlushInterval: 10 * time.Second,
+		NumWorkers:    numberOfWorkers,
+		FlushBytes:    flushBytes,
+		FlushInterval: flushInterval,
 		OnError: func(ctx context.Context, err error) {
 			logger.Error("Bulk indexer error", zap.Error(err))
 		},
@@ -272,7 +334,7 @@ func newOpenSearchCore(config *opensearch.Config, indexNameGenerator *IndexGener
 
 	indexer, err := opensearchutil.NewBulkIndexer(indexerConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create bulk indexer: %v", err)
+		return nil, nil, fmt.Errorf("failed to create bulk indexer: %w", err)
 	}
 
 	writer := &openSearchWriter{
@@ -282,6 +344,7 @@ func newOpenSearchCore(config *opensearch.Config, indexNameGenerator *IndexGener
 		logger:        logger,
 		// dynamically generate index name
 		indexNameGenerator: indexNameGenerator,
+		stopChan:           make(chan struct{}),
 	}
 
 	encoderConfig := zap.NewProductionEncoderConfig()
@@ -306,7 +369,7 @@ func IsOpenSearchReady(url string, timeout time.Duration, insecure bool) bool {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}, //nolint:gosec
 	}
 	client := &http.Client{Transport: transport}
 

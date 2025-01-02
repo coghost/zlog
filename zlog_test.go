@@ -1,6 +1,7 @@
 package zlog
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -9,19 +10,23 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-func TestMustNewZapLoggerWithOpenSearch(t *testing.T) {
-	opensearchURL := "https://localhost:9200"
-	insecure := true // Set to false if you have valid certificates
+const (
+	_testOpensearchFlushTimeout = 5 * time.Second
+	_testOpensearchURL          = "http://localhost:9200"
 
+	_testIsInsecure = true // Set to false if you have valid certificates
+)
+
+func TestMustNewZapLoggerWithOpenSearch(t *testing.T) {
 	// Check if OpenSearch is ready
-	if !IsOpenSearchReady(opensearchURL, 5*time.Second, insecure) {
+	if !IsOpenSearchReady(_testOpensearchURL, 5*time.Second, _testIsInsecure) {
 		msg := "OpenSearch is not ready. Skipping test."
 		fmt.Println(msg)
 		t.Skip(msg)
 	}
 
 	// Create a logger with OpenSearch enabled
-	defaultConfig := DefaultOpenSearchConfig(opensearchURL, insecure)
+	defaultConfig := DefaultOpenSearchConfig(_testOpensearchURL, _testIsInsecure)
 	logger, flushFunc := MustNewZapLoggerWithOpenSearch(
 		WithOpenSearchConfig(&defaultConfig),
 		WithOpenSearchIndex("zlog-test", string(DateFormatDot)),
@@ -59,17 +64,14 @@ func TestMustNewZapLoggerWithOpenSearch(t *testing.T) {
 }
 
 func TestLogToOpenSearch(t *testing.T) {
-	opensearchURL := "https://localhost:9200"
-	insecure := true // Set to false if you have valid certificates
-
 	// Check if OpenSearch is ready
-	if !IsOpenSearchReady(opensearchURL, 5*time.Second, insecure) {
+	if !IsOpenSearchReady(_testOpensearchURL, 5*time.Second, _testIsInsecure) {
 		msg := "OpenSearch is not ready. Skipping test."
 		fmt.Println(msg)
 		t.Skip(msg)
 	}
 
-	defaultConfig := DefaultOpenSearchConfig(opensearchURL, insecure)
+	defaultConfig := DefaultOpenSearchConfig(_testOpensearchURL, _testIsInsecure)
 	logger, flushFunc := MustNewZapLoggerWithOpenSearch(
 		WithOpenSearchConfig(&defaultConfig),
 		WithOpenSearchIndex("zlog-test", string(DateFormatDot)),
@@ -77,20 +79,23 @@ func TestLogToOpenSearch(t *testing.T) {
 		WithConsole(true),
 	)
 
+	ctx, cancel := context.WithTimeout(context.Background(), _testOpensearchFlushTimeout)
+	defer cancel()
+
 	// Log some test messages with timestamps and flush after each
 	now := time.Now()
 	logger.Info("Test info message v4", zap.Time("timestamp", now))
-	if err := flushFunc(); err != nil {
+	if err := flushFunc(ctx); err != nil {
 		t.Errorf("Failed to flush logs: %v", err)
 	}
 
 	logger.Warn("Test warning message v4", zap.Time("timestamp", now.Add(time.Second)))
-	if err := flushFunc(); err != nil {
+	if err := flushFunc(ctx); err != nil {
 		t.Errorf("Failed to flush logs: %v", err)
 	}
 
 	logger.Error("Test error message v4", zap.Time("timestamp", now.Add(2*time.Second)))
-	if err := flushFunc(); err != nil {
+	if err := flushFunc(ctx); err != nil {
 		t.Errorf("Failed to flush logs: %v", err)
 	}
 
@@ -101,7 +106,7 @@ func TestLogToOpenSearch(t *testing.T) {
 		zap.Int("attempt", 3),
 		zap.Duration("backoff", time.Second*5),
 	)
-	if err := flushFunc(); err != nil {
+	if err := flushFunc(ctx); err != nil {
 		t.Errorf("Failed to flush logs: %v", err)
 	}
 
@@ -111,7 +116,7 @@ func TestLogToOpenSearch(t *testing.T) {
 			zap.Time("timestamp", now.Add(time.Duration(4+i)*time.Second)),
 			zap.Int("iteration", i+1),
 		)
-		if err := flushFunc(); err != nil {
+		if err := flushFunc(ctx); err != nil {
 			t.Errorf("Failed to flush logs: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond) // Small delay between logs

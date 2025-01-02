@@ -170,7 +170,7 @@ func MustNewZapLogger(opts ...LogOptFunc) *zap.Logger {
 	return logger
 }
 
-func genProdEncoder() zapcore.Encoder { //nolint
+func genProdEncoder() zapcore.Encoder {
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
@@ -178,7 +178,7 @@ func genProdEncoder() zapcore.Encoder { //nolint
 	return zapcore.NewConsoleEncoder(encoderConfig)
 }
 
-func genDevEncoder(isConsole bool) zapcore.Encoder { //nolint
+func genDevEncoder(isConsole bool) zapcore.Encoder {
 	encoderConfig := zap.NewDevelopmentEncoderConfig()
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05")
 	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
